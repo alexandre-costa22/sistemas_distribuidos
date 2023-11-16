@@ -1,123 +1,75 @@
 import socket
 import pickle
-import threading
-import time
 
-# Dicionário para armazenar dados dos usuários (matrícula: [senha, saldo])
-usuarios = {}
+usuarios_cadastrados = []
 
-# Dicionário para armazenar informações de sessão (matrícula: sessao)
-sessoes = {}
+def cadastrar_usuario(matricula, senha, saldo=0):
+    usuario = {'matricula': matricula, 'senha': senha, 'saldo': saldo, 'autenticado': False}
+    usuarios_cadastrados.append(usuario)
+    return usuario
 
-# Classe para representar a sessão do usuário
-class Sessao:
-    def __init__(self, matricula):
-        self.matricula = matricula
-        self.autenticado = False
+def processar_pedido(data, usuarios):
+    opcao = data['opcao']
+    matricula = data['matricula']
 
-def cadastrar_usuario(matricula, senha, saldo):
-    usuarios[matricula] = [senha, saldo]
-
-def processar_pedido(matricula, total_pedido):
-    if matricula in usuarios and sessoes[matricula].autenticado:
-        saldo_atual = usuarios[matricula][1]
-
-        if saldo_atual >= total_pedido:
-            usuarios[matricula][1] -= total_pedido
-            return "Compra realizada"
-        else:
-            return "Saldo Insuficiente"
-    else:
-        return "Usuário não autenticado. Faça login para fazer um pedido."
-
-def adicionar_saldo(matricula, valor):
-    usuarios[matricula][1] += valor
-
-def autenticar_usuario(matricula, senha):
-    if matricula in usuarios and usuarios[matricula][0] == senha:
-        return True
-    return False
-
-def fazer_pedido(matricula):
-    if matricula in sessoes and sessoes[matricula].autenticado:
-        return True
-    return False
-
-def lidar_com_cliente(client_socket, addr):
-    print(f"Conexão de {addr}")
-
-    data = client_socket.recv(1024)
-    print(f"Dados recebidos do cliente: {data}")
-
-    data = pickle.loads(data)
-    print(f"Dados desserializados: {data}")
-
-    if data['opcao'] == 'cadastrar':
-        matricula = data['matricula']
+    if opcao == 'cadastrar':
         senha = data['senha']
-        saldo = data.get('saldo')
-        cadastrar_usuario(matricula, senha, saldo)
+        saldo = data.get('saldo', 0)
+        usuarios[matricula] = cadastrar_usuario(matricula, senha, saldo)
+        return {'mensagem': 'Usuário cadastrado com sucesso!'}
 
-    elif data['opcao'] == 'autenticar':
-        matricula = data['matricula']
+    elif opcao == 'autenticar':
         senha = data['senha']
-        resultado = autenticar_usuario(matricula, senha)
-        resposta = {'autenticado': resultado}
-        
-        if resultado:
-            # Cria uma nova sessão para o usuário autenticado
-            sessoes[matricula] = Sessao(matricula)
-            sessoes[matricula].autenticado = True
+        for usuario in usuarios_cadastrados:
+            if matricula == usuario['matricula'] and usuario['senha'] == senha:
+                usuarios[matricula]['autenticado'] = True
+                return {'autenticado': True, 'novo_saldo': usuarios[matricula]['saldo']}
+        return {'autenticado': False, 'erro': 'Matrícula ou senha incorretos.'}
 
-        print(f"Enviando resposta para o cliente: {resposta}")
-        client_socket.send(pickle.dumps(resposta))
-
-    elif data['opcao'] == 'adicionar_saldo':
-        matricula = data['matricula']
+    elif opcao == 'adicionar_saldo':
         valor = data['valor']
-        adicionar_saldo(matricula, valor)
+        usuarios[matricula]['saldo'] += valor
+        return {'mensagem': 'Saldo adicionado com sucesso!', 'novo_saldo': usuarios[matricula]['saldo']}
 
-    elif data['opcao'] == 'fazer_pedido':
-        if data[matricula] in sessoes: 
-            matricula = data['matricula']
-            total_pedido = data['total_pedido']
-            resposta_pedido = processar_pedido(matricula, total_pedido)
-            print(resposta_pedido)
-            client_socket.send(resposta_pedido.encode())
+    elif opcao == 'fazer_pedido':
+        total_pedido = data['total_pedido']
+
+        if usuarios[matricula]['saldo'] >= total_pedido:
+            usuarios[matricula]['saldo'] -= total_pedido
+            return {'mensagem': 'Pedido realizado com sucesso!', 'novo_saldo': usuarios[matricula]['saldo']}
         else:
-            print("Usuário não autenticado. Faça login para fazer um pedido.")
+            return {'mensagem': 'Saldo insuficiente para realizar o pedido. Pedido cancelado.', 'novo_saldo': usuarios[matricula]['saldo']}
 
-    # Aguarda um curto período antes de fechar o socket
-    time.sleep(0.1)
-    
-    # Envia um sinal de confirmação para o cliente
-    client_socket.send(b'OK')
-    client_socket.close()
 
-def receber_entradas():
-    while True:
-        entrada = input("Digite 'listar' para exibir os usuários: ")
-        if entrada.lower() == 'listar':
-            lista_usuarios = listar_usuarios()
-            print(f"Listando usuários no servidor: {lista_usuarios}")
-
-if __name__ == "__main__":
+def main():
+    usuarios = {}
     host = '127.0.0.1'
     port = 12345
 
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server_socket.bind((host, port))
-    server_socket.listen(1)
+    server_socket.listen()
 
     print(f"Servidor ouvindo em {host}:{port}")
 
-    # Inicia a thread para receber entradas do servidor
-    thread_entradas = threading.Thread(target=receber_entradas, daemon=True)
-    thread_entradas.start()
-
     while True:
-        client_socket, addr = server_socket.accept()
+        client_socket, client_address = server_socket.accept()
+        print(f"Conexão estabelecida com {client_address}")
 
-        # Inicia uma nova thread para lidar com a conexão do cliente
-        thread_cliente = threading.Thread(target=lidar_com_cliente, args=(client_socket, addr))
-        thread_cliente.start()
+        try:
+            while True:
+                data = client_socket.recv(1024)
+                if not data:
+                    break
+                data_dict = pickle.loads(data)
+                response = processar_pedido(data_dict, usuarios)
+                client_socket.send(pickle.dumps(response))
+
+        except Exception as e:
+            print(f"Erro na conexão: {e}")
+
+        finally:
+            client_socket.close()
+
+if __name__ == "__main__":
+    main()
