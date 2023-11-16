@@ -1,125 +1,123 @@
 import socket
+import pickle
 import threading
-import queue
-import json
+import time
 
-class CantinaServer:
-    def __init__(self):
-        self.clientes_conectados = {}
-        self.fila_pedidos = queue.Queue()
-        self.mutex = threading.Lock()
-        self.cadastro = []
+# Dicionário para armazenar dados dos usuários (matrícula: [senha, saldo])
+usuarios = {}
 
-    def iniciar_servidor(self, host, porta):
-        self.servidor = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.servidor.bind((host, porta))
-        self.servidor.listen(5)
-        print(f"Servidor iniciado em {host}:{porta}")
+# Dicionário para armazenar informações de sessão (matrícula: sessao)
+sessoes = {}
 
-        while True:
-            cliente, endereco = self.servidor.accept()
-            threading.Thread(target=self.lidar_cliente, args=(cliente,)).start()
+# Classe para representar a sessão do usuário
+class Sessao:
+    def __init__(self, matricula):
+        self.matricula = matricula
+        self.autenticado = False
 
-    def lidar_cliente(self, cliente):
-        dados_cliente = cliente.recv(1024).decode()
+def cadastrar_usuario(matricula, senha, saldo):
+    usuarios[matricula] = [senha, saldo]
 
-        try:
-            dados_cliente = json.loads(dados_cliente)
+def processar_pedido(matricula, total_pedido):
+    if matricula in usuarios and sessoes[matricula].autenticado:
+        saldo_atual = usuarios[matricula][1]
 
-            if "escolha" in dados_cliente:
-                if dados_cliente["escolha"] == "cadastro":
-                    dados_cliente["escolha"] == "login"
-                    sucesso_cadastro = self.add_cadastro(dados_cliente, cliente)
-                    if sucesso_cadastro:
-                        cliente.send("Cadastro realizado com sucesso!\n".encode())
-                    else:
-                        cliente.send("Erro ao cadastrar usuário.\n".encode())
-                elif dados_cliente["escolha"] == "login":
-                    matricula = dados_cliente["matricula"]
-                    senha = dados_cliente["senha"]
-                    if self.autenticar_cliente(matricula, senha):
-                        saldo = self.obter_saldo(matricula)
-                        if saldo is not None:
-                            cliente.send(f"Autenticado com sucesso!\n".encode())
-                            self.enviar_cardapio(cliente, matricula)  # Esta linha já está no lugar certo
-                            self.lidar_pedidos(cliente, matricula)
-                        else:
-                            cliente.send("Erro ao obter saldo.\n".encode())
-                    else:
-                        cliente.send("Falha na autenticação. Matrícula ou senha incorretas.\n".encode())
+        if saldo_atual >= total_pedido:
+            usuarios[matricula][1] -= total_pedido
+            return "Compra realizada"
+        else:
+            return "Saldo Insuficiente"
+    else:
+        return "Usuário não autenticado. Faça login para fazer um pedido."
 
-        except json.JSONDecodeError:
-            cliente.send("Erro ao processar dados do cliente.\n".encode())
+def adicionar_saldo(matricula, valor):
+    usuarios[matricula][1] += valor
 
-    def add_cadastro(self, novo_cliente, cliente):
-        self.mutex.acquire()
-
-        novo_cadastro = {
-            "matricula": novo_cliente["matricula"],
-            "senha": novo_cliente["senha"],
-            "saldo": novo_cliente["saldo"],
-            "escolha": novo_cliente["escolha"]
-        }
-
-        self.cadastro.append(novo_cadastro)
-        self.clientes_conectados[novo_cliente["matricula"]] = cliente
-        self.mutex.release()
-
-        cliente.send("Cadastro realizado com sucesso!\n".encode())
-
+def autenticar_usuario(matricula, senha):
+    if matricula in usuarios and usuarios[matricula][0] == senha:
         return True
+    return False
 
-    def autenticar_cliente(self, matricula, senha):
-        self.mutex.acquire()
-        for cliente in self.cadastro:
-            if cliente["matricula"].strip() == matricula.strip() and cliente["senha"].strip() == senha.strip():
-                self.mutex.release()
-                return True
-        self.mutex.release()
-        return False
+def fazer_pedido(matricula):
+    if matricula in sessoes and sessoes[matricula].autenticado:
+        return True
+    return False
 
-    def obter_saldo(self, matricula):
-        self.mutex.acquire()
-        for cliente in self.cadastro:
-            if cliente["matricula"].strip() == matricula.strip():
-                saldo = cliente["saldo"]
-                self.mutex.release()
-                return saldo
-        self.mutex.release()
-        return None
+def lidar_com_cliente(client_socket, addr):
+    print(f"Conexão de {addr}")
 
-    def lidar_pedidos(self, cliente, matricula):
-        self.enviar_cardapio(cliente, matricula)
-        while True:
-            pedido = cliente.recv(1024).decode()
-            if pedido == "sair":
-                break
-            else:
-                self.mutex.acquire()
-                self.fila_pedidos.put((matricula, pedido))
-                self.mutex.release()
+    data = client_socket.recv(1024)
+    print(f"Dados recebidos do cliente: {data}")
 
-    def enviar_cardapio(self, cliente, matricula):
-        cardapio = "Cardápio:\n1. Café 1\n2. Cappuccino"
-        cliente.send(cardapio.encode())
+    data = pickle.loads(data)
+    print(f"Dados desserializados: {data}")
 
-    def exibir_cadastro(self):
-        self.mutex.acquire()
-        print("\nLista de Usuários Cadastrados:")
-        for cliente in self.cadastro:
-            print(cliente)
-        self.mutex.release()
+    if data['opcao'] == 'cadastrar':
+        matricula = data['matricula']
+        senha = data['senha']
+        saldo = data.get('saldo')
+        cadastrar_usuario(matricula, senha, saldo)
+
+    elif data['opcao'] == 'autenticar':
+        matricula = data['matricula']
+        senha = data['senha']
+        resultado = autenticar_usuario(matricula, senha)
+        resposta = {'autenticado': resultado}
+        
+        if resultado:
+            # Cria uma nova sessão para o usuário autenticado
+            sessoes[matricula] = Sessao(matricula)
+            sessoes[matricula].autenticado = True
+
+        print(f"Enviando resposta para o cliente: {resposta}")
+        client_socket.send(pickle.dumps(resposta))
+
+    elif data['opcao'] == 'adicionar_saldo':
+        matricula = data['matricula']
+        valor = data['valor']
+        adicionar_saldo(matricula, valor)
+
+    elif data['opcao'] == 'fazer_pedido':
+        if data[matricula] in sessoes: 
+            matricula = data['matricula']
+            total_pedido = data['total_pedido']
+            resposta_pedido = processar_pedido(matricula, total_pedido)
+            print(resposta_pedido)
+            client_socket.send(resposta_pedido.encode())
+        else:
+            print("Usuário não autenticado. Faça login para fazer um pedido.")
+
+    # Aguarda um curto período antes de fechar o socket
+    time.sleep(0.1)
+    
+    # Envia um sinal de confirmação para o cliente
+    client_socket.send(b'OK')
+    client_socket.close()
+
+def receber_entradas():
+    while True:
+        entrada = input("Digite 'listar' para exibir os usuários: ")
+        if entrada.lower() == 'listar':
+            lista_usuarios = listar_usuarios()
+            print(f"Listando usuários no servidor: {lista_usuarios}")
 
 if __name__ == "__main__":
-    servidor = CantinaServer()
-    threading.Thread(target=servidor.iniciar_servidor, args=('localhost', 12345)).start()
+    host = '127.0.0.1'
+    port = 12345
+
+    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server_socket.bind((host, port))
+    server_socket.listen(1)
+
+    print(f"Servidor ouvindo em {host}:{port}")
+
+    # Inicia a thread para receber entradas do servidor
+    thread_entradas = threading.Thread(target=receber_entradas, daemon=True)
+    thread_entradas.start()
 
     while True:
-        comando = input("\nComandos disponíveis: 'lista' para exibir usuários cadastrados, 'sair' para encerrar: ")
+        client_socket, addr = server_socket.accept()
 
-        if comando.lower() == 'lista':
-            servidor.exibir_cadastro()
-        elif comando.lower() == 'sair':
-            break
-        else:
-            print("Comando inválido. Tente novamente.")
+        # Inicia uma nova thread para lidar com a conexão do cliente
+        thread_cliente = threading.Thread(target=lidar_com_cliente, args=(client_socket, addr))
+        thread_cliente.start()
